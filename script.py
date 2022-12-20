@@ -1,5 +1,5 @@
 ''' 
-This script does conditional image generation on MNIST, using a diffusion model
+This script does conditional image generation on LIDC, using a diffusion model
 
 This code is modified from,
 https://github.com/cloneofsimo/minDiffusion
@@ -22,7 +22,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import models, transforms
-from torchvision.datasets import MNIST
+from LIDC_dataset import LIDC
 from torchvision.utils import save_image, make_grid
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
@@ -117,7 +117,7 @@ class EmbedFC(nn.Module):
 
 
 class ContextUnet(nn.Module):
-    def __init__(self, in_channels, n_feat = 256, n_classes=10):
+    def __init__(self, in_channels, n_feat = 256, n_classes=2):
         super(ContextUnet, self).__init__()
 
         self.in_channels = in_channels
@@ -138,7 +138,12 @@ class ContextUnet(nn.Module):
 
         self.up0 = nn.Sequential(
             # nn.ConvTranspose2d(6 * n_feat, 2 * n_feat, 7, 7), # when concat temb and cemb end up w 6*n_feat
-            nn.ConvTranspose2d(2 * n_feat, 2 * n_feat, 7, 7), # otherwise just have 2*n_feat
+            
+            # WARNING: Had to change the following line
+            #nn.ConvTranspose2d(2 * n_feat, 2 * n_feat, 7, 7), # otherwise just have 2*n_feat
+            #to this, to have correct dimensions for LIDC
+            # hope that doesn't break anything
+            nn.ConvTranspose2d(2 * n_feat, 2 * n_feat, 8, 8), # otherwise just have 2*n_feat
             nn.GroupNorm(8, 2 * n_feat),
             nn.ReLU(),
         )
@@ -154,7 +159,7 @@ class ContextUnet(nn.Module):
 
     def forward(self, x, c, t, context_mask):
         # x is (noisy) image, c is context label, t is timestep, 
-        # context_mask says which samples to block the context on
+        # context_mask says which samples to blockc the context on
 
         x = self.init_conv(x)
         down1 = self.down1(x)
@@ -163,7 +168,7 @@ class ContextUnet(nn.Module):
 
         # convert context to one hot embedding
         c = nn.functional.one_hot(c, num_classes=self.n_classes).type(torch.float)
-        
+
         # mask out context if context_mask == 1
         context_mask = context_mask[:, None]
         context_mask = context_mask.repeat(1,self.n_classes)
@@ -178,9 +183,8 @@ class ContextUnet(nn.Module):
 
         # could concatenate the context embedding here instead of adaGN
         # hiddenvec = torch.cat((hiddenvec, temb1, cemb1), 1)
-
         up1 = self.up0(hiddenvec)
-        # up2 = self.up1(up1, down2) # if want to avoid add and multiply embeddings
+#         up2 = self.up1(up1, down2) # if want to avoid add and multiply embeddings
         up2 = self.up1(cemb1*up1+ temb1, down2)  # add and multiply embeddings
         up3 = self.up2(cemb2*up2+ temb2, down1)
         out = self.out(torch.cat((up3, x), 1))
@@ -217,7 +221,7 @@ def ddpm_schedules(beta1, beta2, T):
 
 
 class DDPM(nn.Module):
-    def __init__(self, nn_model, betas, n_T, device, drop_prob=0.1):
+    def __init__(self, nn_model, betas, n_T, device, drop_prob=0.1, n_classes=2):
         super(DDPM, self).__init__()
         self.nn_model = nn_model.to(device)
 
@@ -230,6 +234,7 @@ class DDPM(nn.Module):
         self.device = device
         self.drop_prob = drop_prob
         self.loss_mse = nn.MSELoss()
+        self.n_classes = n_classes
 
     def forward(self, x, c):
         """
@@ -259,7 +264,7 @@ class DDPM(nn.Module):
         # where w>0 means more guidance
 
         x_i = torch.randn(n_sample, *size).to(device)  # x_T ~ N(0, 1), sample initial noise
-        c_i = torch.arange(0,10).to(device) # context for us just cycles throught the mnist labels
+        c_i = torch.arange(0, self.n_classes).to(device) # context for us just cycles throught the mnist labels
         c_i = c_i.repeat(int(n_sample/c_i.shape[0]))
 
         # don't drop context at test time
@@ -303,26 +308,32 @@ class DDPM(nn.Module):
 def train_mnist():
 
     # hardcoding these here
-    n_epoch = 20
-    batch_size = 256
+    n_epoch = 40
+    batch_size = 32
     n_T = 400 # 500
-    device = "cuda:0"
-    n_classes = 10
-    n_feat = 128 # 128 ok, 256 better (but slower)
+    device = "cuda:1"
+    n_classes = 2
+    n_feat = 512 # 128 ok, 256 better (but slower)
     lrate = 1e-4
-    save_model = False
-    save_dir = './data/diffusion_outputs10/'
-    ws_test = [0.0, 0.5, 2.0] # strength of generative guidance
+    save_model = True
+    plot_path = "./plots/"
+    model_path = "./saved_model/"
+    ws_test = [0.5, 1.0, 1.5, 2.0] # strength of generative guidance
 
-    ddpm = DDPM(nn_model=ContextUnet(in_channels=1, n_feat=n_feat, n_classes=n_classes), betas=(1e-4, 0.02), n_T=n_T, device=device, drop_prob=0.1)
+    ddpm = DDPM(
+        nn_model=ContextUnet(in_channels=1, n_feat=n_feat, n_classes=n_classes), 
+        betas=(1e-4, 0.02), 
+        n_T=n_T, 
+        device=device, 
+        drop_prob=0.1,
+        n_classes = n_classes
+    )
     ddpm.to(device)
 
     # optionally load a model
     # ddpm.load_state_dict(torch.load("./data/diffusion_outputs/ddpm_unet01_mnist_9.pth"))
 
-    tf = transforms.Compose([transforms.ToTensor()]) # mnist is already normalised 0 to 1
-
-    dataset = MNIST("./data", train=True, download=True, transform=tf)
+    dataset = LIDC("/home/lbrocki/LIDC/dataset_masks", train=True)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=5)
     optim = torch.optim.Adam(ddpm.parameters(), lr=lrate)
 
@@ -348,51 +359,69 @@ def train_mnist():
             pbar.set_description(f"loss: {loss_ema:.4f}")
             optim.step()
         
-        # for eval, save an image of currently generated samples (top rows)
-        # followed by real images (bottom rows)
-        ddpm.eval()
-        with torch.no_grad():
-            n_sample = 4*n_classes
-            for w_i, w in enumerate(ws_test):
-                x_gen, x_gen_store = ddpm.sample(n_sample, (1, 28, 28), device, guide_w=w)
+        if(ep%5 == 0 or ep == int(n_epoch-1)):
+            # for eval, save an image of currently generated samples (top rows)
+            # followed by real images (bottom rows)
+            ddpm.eval()
+            with torch.no_grad():
+                n_sample = 8*n_classes
+                for w_i, w in enumerate(ws_test):
+                    x_gen, x_gen_store = ddpm.sample(n_sample, (1, 32, 32), device, guide_w=w)
 
-                # append some real images at bottom, order by class also
-                x_real = torch.Tensor(x_gen.shape).to(device)
-                for k in range(n_classes):
-                    for j in range(int(n_sample/n_classes)):
-                        try: 
-                            idx = torch.squeeze((c == k).nonzero())[j]
-                        except:
-                            idx = 0
-                        x_real[k+(j*n_classes)] = x[idx]
+                    # append some real images at bottom, order by class also
+                    x_real = torch.Tensor(x_gen.shape).to(device)
+                    for k in range(n_classes):
+                        for j in range(int(n_sample/n_classes)):
+                            try: 
+                                idx = torch.squeeze((c == k).nonzero())[j]
+                            except:
+                                idx = 0
+                            x_real[k+(j*n_classes)] = x[idx]
 
-                x_all = torch.cat([x_gen, x_real])
-                grid = make_grid(x_all*-1 + 1, nrow=10)
-                save_image(grid, save_dir + f"image_ep{ep}_w{w}.png")
-                print('saved image at ' + save_dir + f"image_ep{ep}_w{w}.png")
+                    x_all = torch.cat([1-x_gen, 1-x_real])
+                    grid = make_grid(x_all*-1 + 1, nrow=2)
+                    save_image(grid, plot_path + f"image_ep{ep}_w{w}.png")
+                    print('saved image at ' + plot_path + f"image_ep{ep}_w{w}.png")
 
-                if ep%5==0 or ep == int(n_epoch-1):
-                    # create gif of images evolving over time, based on x_gen_store
-                    fig, axs = plt.subplots(nrows=int(n_sample/n_classes), ncols=n_classes,sharex=True,sharey=True,figsize=(8,3))
-                    def animate_diff(i, x_gen_store):
-                        print(f'gif animating frame {i} of {x_gen_store.shape[0]}', end='\r')
-                        plots = []
-                        for row in range(int(n_sample/n_classes)):
-                            for col in range(n_classes):
-                                axs[row, col].clear()
-                                axs[row, col].set_xticks([])
-                                axs[row, col].set_yticks([])
-                                # plots.append(axs[row, col].imshow(x_gen_store[i,(row*n_classes)+col,0],cmap='gray'))
-                                plots.append(axs[row, col].imshow(-x_gen_store[i,(row*n_classes)+col,0],cmap='gray',vmin=(-x_gen_store[i]).min(), vmax=(-x_gen_store[i]).max()))
-                        return plots
-                    ani = FuncAnimation(fig, animate_diff, fargs=[x_gen_store],  interval=200, blit=False, repeat=True, frames=x_gen_store.shape[0])    
-                    ani.save(save_dir + f"gif_ep{ep}_w{w}.gif", dpi=100, writer=PillowWriter(fps=5))
-                    print('saved image at ' + save_dir + f"gif_ep{ep}_w{w}.gif")
+#                 if ep%5==0 or ep == int(n_epoch-1):
+#                     # create gif of images evolving over time, based on x_gen_store
+#                     fig, axs = plt.subplots(
+#                         nrows=int(n_sample/n_classes), 
+#                         ncols=n_classes,
+#                         sharex=True,
+#                         sharey=True,
+#                         figsize=(8,3)
+#                     )
+#                     def animate_diff(i, x_gen_store):
+#                         print(f'gif animating frame {i} of {x_gen_store.shape[0]}', end='\r')
+#                         plots = []
+#                         for row in range(int(n_sample/n_classes)):
+#                             for col in range(n_classes):
+#                                 axs[row, col].clear()
+#                                 axs[row, col].set_xticks([])
+#                                 axs[row, col].set_yticks([])
+#                                 # plots.append(axs[row, col].imshow(x_gen_store[i,(row*n_classes)+col,0],cmap='gray'))
+#                                 plots.append(axs[row, col].imshow(
+#                                     -x_gen_store[i,(row*n_classes)+col,0],
+#                                     cmap='gray',vmin=(-x_gen_store[i]).min(), 
+#                                     vmax=(-x_gen_store[i]).max())
+#                                 )
+#                         return plots
+#                     ani = FuncAnimation(
+#                         fig, 
+#                         animate_diff, 
+#                         fargs=[x_gen_store],  
+#                         interval=200, 
+#                         blit=False, 
+#                         repeat=True, 
+#                         frames=x_gen_store.shape[0]
+#                     )    
+#                     ani.save(save_dir + f"gif_ep{ep}_w{w}.gif", dpi=100, writer=PillowWriter(fps=5))
+#                     print('saved image at ' + save_dir + f"gif_ep{ep}_w{w}.gif")
         # optionally save model
         if save_model and ep == int(n_epoch-1):
-            torch.save(ddpm.state_dict(), save_dir + f"model_{ep}.pth")
-            print('saved model at ' + save_dir + f"model_{ep}.pth")
+            torch.save(ddpm.state_dict(), model_path + f"model512_{ep}.pth")
+            print('saved model at ' + model_path + f"model512_{ep}.pth")
 
 if __name__ == "__main__":
     train_mnist()
-
