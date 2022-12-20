@@ -6,7 +6,7 @@
 <img width="700" src="lidc_diff.png"/img>
 </p>
 <p align = "center">
-Generated samples, the top graphics show original samples and the lower ones synthesized ones. 
+Generated samples, two top rows show original samples and the lower ones synthesized samples. 
 </p>
 
 
